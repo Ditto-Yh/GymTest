@@ -1,0 +1,92 @@
+import tensorflow as tf
+import numpy as np
+import gym
+import random
+
+LR = 0.01
+EPISODE = 3000
+STEP = 300
+TEST = 5
+GAMMA = 0.95
+
+class PG_net():
+    def __init__(self,env):
+        self.s_dim = env.observation_space.shape[0]
+        self.a_dim = env.action_space.n
+        self.ep_ss = []
+        self.ep_as = []
+        self.ep_rs = []
+
+        self.create_pg_network()
+
+        self.sess = tf.Session()
+        self.sess.run(tf.global_variables_initializer())
+
+    def create_pg_network(self):
+
+        self.s_input = tf.placeholder(tf.float32,[None,self.s_dim])
+        self.a_input = tf.placeholder(tf.int32,[None,])
+        self.v_input = tf.placeholder(tf.float32,[None,])
+
+        h_layer = tf.layers.dense(self.s_input,20,activation=tf.nn.relu,trainable=True)
+        softmax_in = tf.layers.dense(h_layer,self.a_dim,trainable=True)
+
+        self.a_prob = tf.nn.softmax(softmax_in)
+
+        neg_log_p = tf.nn.sparse_softmax_cross_entropy_with_logits(logits = softmax_in,labels = self.a_input)
+        loss = tf.reduce_mean(neg_log_p * self.v_input)
+        self.train_op = tf.train.AdamOptimizer(LR).minimize(loss)
+
+    def choose_action(self,state):
+        action_prob = self.sess.run(self.a_prob,{self.s_input:state[np.newaxis,:]})
+        return np.random.choice(range(action_prob.shape[1]),p=action_prob.ravel())
+
+    def store(self,s,a,r):
+        self.ep_ss.append(s)
+        self.ep_as.append(a)
+        self.ep_rs.append(r)
+
+    def learn(self):
+        ave_r = np.zeros_like(self.ep_rs)
+        running_r = 0
+
+        for t in reversed(range(0,len(self.ep_rs))):
+            running_r = running_r * GAMMA + self.ep_rs[t]
+            ave_r[t] = running_r
+
+        ave_r -= np.mean(ave_r)
+        ave_r /= np.std(ave_r)
+
+        self.sess.run(self.train_op,{self.s_input:np.vstack(self.ep_ss),self.a_input: np.array(self.ep_as),self.v_input: ave_r})
+
+        self.ep_ss = []
+        self.ep_as = []
+        self.ep_rs = []
+
+if __name__ == '__main__':
+    env = gym.make('CartPole-v0')
+    agent = PG_net(env)
+    for episode in range(EPISODE):
+        state = env.reset()
+        for step in range(STEP):
+            action = agent.choose_action(state)
+            s_,reward,done,_ = env.step(action)
+            agent.store(state,action,reward)
+            state = s_
+            if done:
+                agent.learn()
+                break
+
+        if episode%100 == 0:
+            total_reward = 0
+            for test in range(TEST):
+                state = env.reset()
+                for step in range(STEP):
+                    env.render()
+                    action = agent.choose_action(state)
+                    state,reward,done,_ = env.step(action)
+                    total_reward += reward
+
+                    if done:
+                        break
+            print("EP:",episode,"ave_reward:",total_reward/TEST)
