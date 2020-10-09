@@ -1,0 +1,213 @@
+import tensorflow as tf
+import numpy as np
+import gym
+import random
+from collections import deque
+
+INIT_EPSILON = 0.9
+FINA_EPSILON = 0.01
+EPISODE = 3000
+STEP = 200
+TEST = 5
+GAMMA = 0.9
+REPLACE_TARGET=10
+
+MAX_MEMORY = 500
+BATCH_SIZE = 32
+
+class DDQN():
+    def __init__(self,env):
+        self.s_dim = env.observation_space.shape[0]
+        self.a_dim = env.action_space.n
+        self.epsilon = INIT_EPSILON
+        
+        self.memory = deque()
+        
+        self.sess = tf.Session()
+
+        self.s_input = tf.placeholder(tf.float32,[None,self.s_dim])
+        self.s_input_target = tf.placeholder(tf.float32,[None,self.s_dim])
+        self.a_input = tf.placeholder(tf.float32,[None,self.a_dim])
+        self.r_input = tf.placeholder(tf.float32,[None,])
+        self.y_input = tf.placeholder(tf.float32,[None,1])
+        
+        with tf.variable_scope('eval'):
+            h_layer = tf.layers.dense(self.s_input,200,activation=tf.nn.relu,trainable=True)
+            self.q = tf.layers.dense(h_layer,self.a_dim,trainable=True)
+
+        with tf.variable_scope('target'):
+            h_layer = tf.layers.dense(self.s_input_target,200,activation=tf.nn.relu,trainable=False)
+            self.q_ = tf.layers.dense(h_layer,self.a_dim,trainable=False)
+
+        with tf.variable_scope('update'):
+            e_params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,scope='eval')
+            t_params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,scope='target')
+            self.target_update = [tf.assign(t,e) for t,e in zip(t_params,e_params)]
+        
+        Q_action = tf.reduce_sum(tf.multiply(self.q,self.a_input),reduction_indices=1)
+        self.cost = tf.reduce_mean(tf.square(self.y_input-Q_action))
+        self.optimizer = tf.train.AdamOptimizer(0.001).minimize(self.cost)
+        
+        self.sess.run(tf.global_variables_initializer())
+
+    def action(self,state):
+        Q_value = self.sess.run(self.q,{self.s_input:state[np.newaxis,:]})[0]
+
+        return np.argmax(Q_value)
+
+    def egreedy(self,state):
+        q_value = self.sess.run(self.q,{self.s_input:state[np.newaxis,:]})[0]
+        
+        if random.random() <= self.epsilon:
+            self.epsilon -= (INIT_EPSILON-FINA_EPSILON)/10000
+            return random.randint(0,self.a_dim-1)
+        
+        else:
+            self.epsilon -= (INIT_EPSILON - FINA_EPSILON) / 10000
+            return np.argmax(q_value)
+        
+    def params_update(self):
+        self.sess.run(self.target_update)
+
+    def store(self,state,action,reward,next_state,done):
+        action_in = np.zeros(self.a_dim)
+        action_in[action] = 1
+
+        self.memory.append((state,action_in,reward,next_state,done))
+
+        if len(self.memory) > MAX_MEMORY:
+            self.memory.popleft()
+
+        if len(self.memory) > BATCH_SIZE:
+            self.train()
+        
+    def train(self):
+        minibatch = random.sample(self.memory,BATCH_SIZE)
+        
+        state_batch = [data[0] for data in minibatch]
+        action_batch = [data[1] for data in minibatch]
+        reward_batch = [data[2] for data in minibatch]
+        next_state_batch = [data[3] for data in minibatch]
+        done_batch = [data[4] for data in minibatch]
+        
+        y_batch = []
+
+        s_in = np.vstack(state_batch)
+        a_in = np.vstack(action_batch)
+        ts_in = np.vstack(next_state_batch)
+        
+        Q_value = self.sess.run(self.q,{self.s_input:ts_in})
+        
+        next_action_batch = np.argmax(Q_value,axis = 1)
+        
+        Q_target_value = self.sess.run(self.q_,{self.s_input_target:ts_in})
+        
+        for i in range(0,BATCH_SIZE):
+            if done_batch[i]:
+                y_batch.append(reward_batch[i])
+            else:
+                y_batch.append(reward_batch[i] + GAMMA * Q_target_value[i,next_action_batch[i]])
+
+        y_in = np.vstack(y_batch)
+
+        self.sess.run(self.optimizer,{self.s_input:s_in,self.a_input:a_in,self.y_input:y_in})
+
+
+if __name__ == '__main__':
+    env = gym.make("MountainCar-v0")
+    env = env.unwrapped
+    env.seed(1)
+
+    agent = DDQN(env)
+
+    # state = env.reset()
+    #
+    # train_step = 0
+    #
+    # while True:
+    #     action = agent.egreedy(state)
+    #
+    #     next_state, reward, done, _ = env.step(action)
+    #
+    #     if next_state[0] > -0.4 and next_state[0] < 0.5:
+    #             reward = 10*(next_state[0]+0.4)**3
+    #     elif next_state[0] >= 0.5:
+    #             reward = 100
+    #     elif next_state[0] <= -0.4:
+    #             reward = -0.1
+    #
+    #     if next_state[0] >= 0.5:
+    #         done = True
+    #     else:
+    #         done = False
+    #
+    #     agent.store(state, action, reward, next_state, done)
+    #     state = next_state
+    #
+    #     if len(agent.memory) > BATCH_SIZE:
+    #         train_step += 1
+    #
+    #     if train_step%300==0:
+    #         agent.params_update()
+    #
+    #     if train_step%20000 == 0 and train_step != 0:
+    #         print(train_step,".....",next_state[0])
+    #
+    #     if next_state[0] >= 0.5:
+    #         total_reward = 0
+    #         for test in range(TEST):
+    #             state = env.reset()
+    #             for step in range(STEP):
+    #                 env.render()
+    #                 action = agent.action(state)
+    #                 state,reward,done,_ = env.step(action)
+    #                 total_reward += reward
+    #
+    #                 if done:
+    #                     break
+    #
+    #         print(train_step,"::::",total_reward/TEST)
+    #         if (total_reward/TEST) > -150:
+    #             break
+    #         else:
+    #             state = env.reset()
+
+    for episode in range(EPISODE):
+        state = env.reset()
+        for step in range(STEP):
+            action = agent.egreedy(state)
+
+            next_state,reward,done,_ = env.step(action)
+
+            if next_state[0] > -0.4 and next_state[0] < 0.5:
+                reward = 10*(next_state[0]+0.4)**3
+            elif next_state[0] >= 0.5:
+                reward = 100
+            elif next_state[0] <= -0.4:
+                reward = -0.1
+
+            #reward = abs(next_state[0] - (-0.5))
+
+            agent.store(state,action,reward,next_state,done)
+            state = next_state
+
+            if(done):
+                break
+
+        if episode %100 == 0:
+            total_reward = 0
+            for test in range(TEST):
+                state = env.reset()
+                for step in range(STEP):
+                    env.render()
+                    action = agent.action(state)
+                    state,reward,done,_ = env.step(action)
+                    total_reward += reward
+
+                    if done:
+                        break
+
+            print(episode,"::::",total_reward/TEST)
+
+        if episode%REPLACE_TARGET == 0:
+            agent.params_update()
