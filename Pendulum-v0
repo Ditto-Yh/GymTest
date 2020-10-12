@@ -1,0 +1,148 @@
+import tensorflow as tf
+import numpy as np
+import random
+import gym
+from collections import deque
+import matplotlib.pyplot as plt
+
+MAX_MEMORY_SIZE = 10000
+BATCH_SIZE = 32
+
+TAU = 0.01
+GAMMA = 0.9
+LR_C = 0.002
+LR_A = 0.001
+EPISODE = 2000
+STEP = 200
+
+class DDPG():
+    def __init__(self,env):
+        self.s_dim = env.observation_space.shape[0]
+        self.a_dim = env.action_space.shape[0]
+        self.a_bound = env.action_space.high
+        self.pointer = 0
+
+        self.memory = deque()
+        
+        self.sess = tf.Session()
+        
+        self.s = tf.placeholder(tf.float32,[None,self.s_dim])
+        self.s_ = tf.placeholder(tf.float32,[None,self.s_dim])
+        self.r = tf.placeholder(tf.float32,[None,1])
+        
+        with tf.variable_scope('Actor'):
+            with tf.variable_scope('eval'):
+                h_layer = tf.layers.dense(self.s,30,activation=tf.nn.relu,trainable=True)
+                a = tf.layers.dense(h_layer,self.a_dim,activation=tf.nn.tanh,trainable=True)
+                self.a = tf.multiply(a,self.a_bound)
+
+            with tf.variable_scope('target'):
+                h_layer = tf.layers.dense(self.s_, 30, activation=tf.nn.relu, trainable=False)
+                a = tf.layers.dense(h_layer, self.a_dim, activation=tf.nn.tanh, trainable=False)
+                self.a_ = tf.multiply(a, self.a_bound)
+
+        with tf.variable_scope('Critic'):
+            with tf.variable_scope('eval'):
+                w_s = tf.get_variable('w_s', [self.s_dim,30])
+                w_a = tf.get_variable('w_a', [self.a_dim,30])
+                b = tf.get_variable('b', [1,30])
+
+                h_layer = tf.nn.relu(tf.matmul(self.s,w_s) + tf.matmul(self.a,w_a) + b)
+                self.q = tf.layers.dense(h_layer,1,trainable=True)
+
+            with tf.variable_scope('target'):
+                w_s = tf.get_variable('w_s', [self.s_dim, 30])
+                w_a = tf.get_variable('w_a', [self.a_dim, 30])
+                b = tf.get_variable('b', [1, 30])
+
+                h_layer = tf.nn.relu(tf.matmul(self.s_, w_s) + tf.matmul(self.a_, w_a) + b)
+                self.q_ = tf.layers.dense(h_layer, 1, trainable=False)
+
+        self.Ae_params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,scope='Actor/eval')
+        self.At_params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Actor/target')
+        self.Ce_params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Critic/eval')
+        self.Ct_params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Critic/target')
+
+        self.soft_replace = [tf.assign(t,(1-TAU)*t + TAU*e)
+                             for t,e in zip(self.At_params + self.Ct_params,self.Ae_params + self.Ce_params)]
+
+        y_th = self.r + GAMMA * self.q_
+        c_loss = tf.losses.mean_squared_error(labels=y_th,predictions=self.q)
+        self.c_train = tf.train.AdamOptimizer(LR_C).minimize(c_loss,var_list=self.Ce_params)
+
+        a_loss = - tf.reduce_mean(self.q)
+        self.a_train = tf.train.AdamOptimizer(LR_A).minimize(a_loss,var_list=self.Ae_params)
+
+        self.sess.run(tf.global_variables_initializer())
+
+    def choose_action(self,state):
+        return self.sess.run(self.a,{self.s:state[np.newaxis,:]})[0]
+
+    def store(self,state,action,reward,state_):
+        self.memory.append((state,action,reward,state_))
+        self.pointer += 1
+
+        if len(self.memory) > MAX_MEMORY_SIZE:
+            self.memory.popleft()
+
+    def learn(self):
+        self.sess.run(self.soft_replace)
+        minibatch = random.sample(self.memory,BATCH_SIZE)
+
+        state_batch = [data[0] for data in minibatch]
+        action_batch = [data[1] for data in minibatch]
+        reward_batch = [data[2] for data in minibatch]
+        next_state_batch = [data[3] for data in minibatch]
+
+        s_in = np.vstack(state_batch)
+        a_in = np.array(action_batch)
+        r_in = np.vstack(reward_batch)
+        n_s_in = np.vstack(next_state_batch)
+
+        self.sess.run(self.a_train,{self.s:s_in})
+        self.sess.run(self.c_train,{self.s:s_in,self.a:a_in,self.r:r_in,self.s_:n_s_in})
+
+tot_rp = []
+r_p = []
+
+if __name__ == '__main__':
+    env = gym.make('Pendulum-v0').unwrapped
+    env.seed(1)
+    agent = DDPG(env)
+
+    var = 3
+
+    for episode in range(EPISODE):
+        state = env.reset()
+        tot_r = 0
+        for step in range(STEP):
+            action = agent.choose_action(state)
+            action = np.clip(np.random.normal(action,var),-2,2)
+
+            state_,reward,done,_ = env.step(action)
+            agent.store(state,action,reward/10,state_)
+
+            if agent.pointer > MAX_MEMORY_SIZE:
+                var *= 0.9995
+                agent.learn()
+
+            tot_r += reward
+            if step == STEP-1:
+                print(episode,"::::",tot_r,"::::::",reward)
+                tot_rp.append(tot_r)
+                r_p.append(reward)
+                break
+
+            state = state_
+
+    plt.figure(1)
+    plt.plot(np.arange(len(tot_rp)),tot_rp)
+    plt.xlabel('epi')
+    plt.ylabel('tot_r')
+    plt.show()
+
+    plt.figure(2)
+    plt.plot(np.arange(len(r_p)), r_p)
+    plt.xlabel('epi')
+    plt.ylabel('last_r')
+    plt.show()
